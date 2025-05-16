@@ -96,7 +96,7 @@ const float KI                  = 0.005;  // [Volt / (encoder counts * seconds)]
 // Timing:
 unsigned long startWaitTime;              // [microseconds] System clock value at the moment the WAIT state started
 const long  WAIT_TIME           = 1000000;// [microseconds] Time waiting at each location
-const int TARGET_BAND           = 1;      // [encoder counts] "Close enough" range when moving towards a target.
+const int TARGET_BAND           = 2;      // [encoder counts] "Close enough" range when moving towards a target.
 
 // USER INPUT:
 const int NUM_POSITIONS = 4;
@@ -144,7 +144,8 @@ void setup() {
   pinMode(X_STAGE,                        OUTPUT);
   pinMode(Y_STAGE,                        OUTPUT);
   Serial.begin(115200);
-  Serial3.begin(115200);
+  Serial3.begin(115200); // FOR VCM
+  analogReference(EXTERNAL); // FOR PHOTODIODE
   
   // Convert all positions from microns to encoder counts
   for (int i = 0; i < NUM_POSITIONS; i++) {
@@ -156,7 +157,8 @@ void setup() {
   delay(1000);
   Serial3.println(">home\r");  // Home
   delay(1000);
-  Serial.println("Finished calibrating VCM");
+  Serial3.println(">speed 3\r");
+  // Serial.println("Finished calibrating VCM");
 }
 
 void loop() {
@@ -212,7 +214,8 @@ void loop() {
       // Serial.print("Your new target position is: ");
       // Serial.println(targetPosition);
       if ((axis_state == 0 ? xPiezoPosition : yPiezoPosition)>=targetPosition-TARGET_BAND && (axis_state == 0 ? xPiezoPosition : yPiezoPosition)<=targetPosition+TARGET_BAND) { // We reached the position
-        Serial.println("YOU REACHED THE POSITION");
+        // Serial.println("YOU REACHED THE POSITION");
+        Serial.println("Starting");
         if (TOGGLE_STATE){ // make sure the signal generator is off!
           signalOutput();
         }  
@@ -226,55 +229,104 @@ void loop() {
       break;
 
     case VCM:
-      // if (!usedVCM){
-      if (directionVCM){
-        Serial3.println(">ma 0\r");
-        directionVCM = false;
-        Serial.println("VCM is going to position 0");
-        delay(1000);
-      }
-      else {
-        Serial3.println(">ma 30000\r");
-        directionVCM = true;
-        Serial.println("VCM is going to position 30000");
-        delay(1000);
-      }
-      // Pass-through from PC to controller
-      if (Serial.available()) {
-        char pcInput = Serial.read();
-        Serial3.write(pcInput);
+      static unsigned long vcmStartTime = 0;
+      static bool vcmMoving = false;
+      static unsigned long moveStartTime = 0;
+      const unsigned long vcmDuration = 2000; // 2 seconds total duration
+      const unsigned long moveTimeout = 1000; // 1 second for VCM to complete movement
+
+      // Initialize on first entry
+      if (vcmStartTime == 0) {
+        vcmStartTime = millis();
+        vcmMoving = false;
+        usedVCM = false;
       }
 
-      // Read full lines from controller
-      while (Serial3.available()) {
-        char c = Serial3.read();
+      // Read and print voltage continuously
+      int pos = analogRead(A0); // Positive signal
+      int neg = analogRead(A1); // Negative signal
+      float voltage = (pos - neg) * (5 / 1023.0); // Scale to 2.5V reference
+      // Serial.print("Voltage: ");
+      Serial.println(voltage, 3); // Print with 3 decimal places
 
-        if (c == '\r' || c == '\n') { // End of message
-          if (incomingLine.length() > 0) {
-            processControllerMessage(incomingLine); // Process and print nicely
-            incomingLine = ""; // Clear buffer
-          }
+      // Handle VCM movement
+      if (!usedVCM && !vcmMoving) {
+        // Serial.print("Direction: ");
+        // Serial.println(directionVCM ? "Backward" : "Forward");
+        if (directionVCM) {
+          // delay(1000);
+          Serial3.println(">ma 0\r");
+          Serial3.println(">status\r");
+          // Serial.println("Moving to 0");
+          // delay(1000);
+          directionVCM = false;
         } else {
-          incomingLine += c;
+          // delay(1000);
+          Serial3.println(">ma 30000\r");
+          Serial3.println(">status\r");
+          // delay(1000);
+          // Serial.println("Moving to 30000");
+          directionVCM = true;
         }
-      }  
-        // usedVCM = true; 
+        vcmMoving = true;
+        moveStartTime = millis();
+        usedVCM = true;
+        // // Pass-through from PC to controller
+        // if (Serial.available()) {
+        //   char pcInput = Serial.read();
+        //   Serial3.write(pcInput);
+        // }
+
+        // // Read full lines from controller
+        // while (Serial3.available()) {
+        //   char c = Serial3.read();
+
+        //   if (c == '\r' || c == '\n') { // End of message
+        //     if (incomingLine.length() > 0) {
+        //       processControllerMessage(incomingLine); // Process and print nicely
+        //       incomingLine = ""; // Clear buffer
+        //     }
+        //   } else {
+        //     incomingLine += c;
+        //   }
+        // }  
+      }
+
+      // Check if VCM movement is complete
+      if (vcmMoving && (millis() - moveStartTime >= moveTimeout)) {
+        vcmMoving = false; // Movement assumed complete
+        Serial.println("VCM movement complete");
+      }
+
+      // Check if total VCM duration is complete
+      if (millis() - vcmStartTime >= vcmDuration) {
+        old_state = VCM;
+        state = WAIT;
+        vcmStartTime = 0; // Reset for next entry
+        Serial.println("Exiting VCM state");
+      }
+          
+      //     usedVCM = true;
+      //   }
+
       // }
-      old_state = VCM; // Record which state you came from
-      state = WAIT; // Transition into WAIT state
+      
+      
+      // old_state = VCM; // Record which state you came from
+      // state = WAIT; // Transition into WAIT state
 
       break;
 
     case WAIT:
       if (micros()-startWaitTime>WAIT_TIME){ // enter WAIT after a certain amount of time
         if (old_state == CALIBRATE_X){
-          Serial.println("Finished calibrating X-Stage");
+          // Serial.println("Finished calibrating X-Stage");
           state = CALIBRATE_Y;
           // state = AXIS;
           Serial.println("State transition from CALIBRATE_X to CALIBRATE_Y");
         }
         if (old_state == CALIBRATE_Y){
-          Serial.println("Finished calibrating Y-Stage");
+          // Serial.println("Finished calibrating Y-Stage");
           state = AXIS;
           currentPositionIndex = 0;
           Serial.println("State transition from CALIBRATE_Y to AXIS");
@@ -300,7 +352,7 @@ void loop() {
         if (old_state == VCM){
           state = AXIS;
           usedVCM = false;
-          Serial.println("State transition from VCM to AXIS");
+          // Serial.println("State transition from VCM to AXIS");
         }
       }
       break;
@@ -382,12 +434,12 @@ void loop() {
     }
   }
 
-  // if (state == MOVE){
-  //   Serial.print("CURRENT POSITION: ");
-  //   Serial.println(axis_state == 0 ? xPiezoPosition : yPiezoPosition);
-  //   Serial.print("Target position: ");
-  //   Serial.println(targetPosition);
-  // }
+  if (state == MOVE){
+    Serial.print("CURRENT POSITION: ");
+    Serial.println(axis_state == 0 ? xPiezoPosition : yPiezoPosition);
+    Serial.print("Target position: ");
+    Serial.println(targetPosition);
+  }
 }
 
 void mode() {
@@ -489,8 +541,8 @@ void setPosition(volatile int &piezoPosition, volatile int &oldPiezoPosition) {
       startTime = 0;
     }
     oldPiezoPosition = piezoPosition;
-    // Serial.print("The calibrating encoder value is ");
-    // Serial.println(piezoPosition);
+    Serial.print("The calibrating encoder value is ");
+    Serial.println(piezoPosition);
   }
 }
 
